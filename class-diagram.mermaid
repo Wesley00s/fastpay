@@ -1,0 +1,48 @@
+classDiagram
+    class User {
+        +UUID id
+        +String name
+        +String document
+    }
+
+    class Account {
+        +UUID id
+        +String agency
+        +String number
+        +Long balanceInCents
+        +debit(Long amountInCents)
+        +credit(Long amountInCents)
+    }
+
+    class PixKey {
+        +UUID id
+        +KeyType type
+        +String value
+        +Instant createdAt
+    }
+
+    class Transaction {
+        +UUID id
+        +Long amountInCents
+        +TransactionStatus status
+        +Instant timestamp
+    }
+
+    class KeyType {
+        <<enumeration>>
+        PHONE
+        EMAIL
+        RANDOM
+    }
+
+    class TransactionStatus {
+        <<enumeration>>
+        PROCESSING
+        COMPLETED
+        FAILED
+    }
+
+    User "1" *-- "*" Account : owns
+    Account "1" *-- "*" PixKey : registers
+    Transaction "*" --> "1" Account : sender
+    Transaction "*" --> "1" Account : receiver
