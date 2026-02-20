@@ -26,4 +26,9 @@ public class AccountPostgresAdapter implements AccountDatabasePort {
     public Account update(Account account) {
         return mapper.toDomain(repository.save(mapper.toEntity(account)));
     }
+
+    @Override
+    public Account save(Account account) {
+        return mapper.toDomain(repository.save(mapper.toEntity(account)));
+    }
 }

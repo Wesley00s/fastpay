@@ -9,4 +9,6 @@ public interface AccountDatabasePort {
     Optional<Account> findById(UUID id);
 
     Account update(Account account);
+
+    Account save(Account account);
 }
