@@ -1,4 +1,9 @@
 package com.fastpay.domain.port.in;
 
-public class SendPixUseCase {
+import com.fastpay.domain.model.Transaction;
+
+import java.util.UUID;
+
+public interface SendPixUseCase {
+    Transaction send(UUID senderAccountId, String destinationKey, Long amountInCents);
 }

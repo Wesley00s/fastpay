@@ -1,4 +1,7 @@
 package com.fastpay.domain.port.out;
 
-public class TransactionDatabasePort {
+import com.fastpay.domain.model.Transaction;
+
+public interface TransactionDatabasePort {
+    Transaction save(Transaction transaction);
 }

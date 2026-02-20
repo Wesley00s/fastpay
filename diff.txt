@@ -1,0 +1,1602 @@
+diff --git a/Dockerfile b/Dockerfile
+new file mode 100644
+index 0000000..6f8df84
+--- /dev/null
++++ b/Dockerfile
+@@ -0,0 +1,18 @@
++FROM gradle:9.3.0-jdk21-jammy AS build
++WORKDIR /app
++
++COPY build.gradle settings.gradle ./
++COPY gradle.properties* ./
++COPY gradle ./gradle
++
++RUN gradle dependencies --no-daemon || true
++
++COPY src ./src
++RUN gradle build --no-daemon -x test
++
++FROM eclipse-temurin:21-jre-jammy
++WORKDIR /app
++COPY --from=build /app/build/libs/*.jar app.jar
++
++EXPOSE 8080
++ENTRYPOINT ["java", "-jar", "app.jar"]
+\ No newline at end of file
+diff --git a/build.gradle b/build.gradle
+index 7e9e596..17ae564 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -25,6 +25,11 @@ repositories {
+ }
+ 
+ dependencies {
++    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:3.0.1'
++    implementation 'org.mapstruct:mapstruct:1.6.3'
++    implementation 'org.springframework.boot:spring-boot-starter-actuator'
++    implementation 'jakarta.validation:jakarta.validation-api:3.1.1'
++
+     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+     implementation 'org.springframework.boot:spring-boot-starter-flyway'
+     implementation 'org.springframework.boot:spring-boot-starter-kafka'
+@@ -33,6 +38,10 @@ dependencies {
+     compileOnly 'org.projectlombok:lombok'
+     runtimeOnly 'org.postgresql:postgresql'
+     annotationProcessor 'org.projectlombok:lombok'
++
++    annotationProcessor 'org.mapstruct:mapstruct-processor:1.6.3'
++    annotationProcessor 'org.projectlombok:lombok-mapstruct-binding:0.2.0'
++
+     testImplementation 'org.springframework.boot:spring-boot-starter-data-jpa-test'
+     testImplementation 'org.springframework.boot:spring-boot-starter-flyway-test'
+     testImplementation 'org.springframework.boot:spring-boot-starter-kafka-test'
+diff --git a/docker-compose.yml b/docker-compose.yml
+index a99ba0b..3a4e94d 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -1,4 +1,28 @@
+ services:
++  app:
++    image: fastpay:latest
++    networks:
++      - fastpay-network
++    build:
++      context: .
++    container_name: fastpay-app
++    restart: always
++    ports:
++      - "8080:8080"
++    depends_on:
++      postgres:
++        condition: service_healthy
++      kafka:
++        condition: service_healthy
++    env_file:
++      - .env
++    healthcheck:
++      test: [ "CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1" ]
++      interval: 10s
++      timeout: 5s
++      retries: 5
++      start_period: 30s
++
+   postgres:
+     image: postgres:18-alpine
+     container_name: fastpay-postgres
+@@ -11,6 +35,11 @@ services:
+       - fastpay_pgdata:/var/lib/postgresql/data
+     networks:
+       - fastpay-network
++    healthcheck:
++      test: [ "CMD", "pg_isready", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}" ]
++      interval: 5s
++      timeout: 5s
++      retries: 5
+ 
+   kafka:
+     image: confluentinc/cp-kafka:8.0.3
+@@ -24,6 +53,12 @@ services:
+       - fastpay_kafka_data:/var/lib/kafka/data
+     networks:
+       - fastpay-network
++    healthcheck:
++      test: [ "CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list" ]
++      interval: 10s
++      timeout: 5s
++      retries: 5
++      start_period: 15s
+ 
+ networks:
+   fastpay-network:
+diff --git a/src/main/java/com/fastpay/application/service/RegisterPixKeyService.java b/src/main/java/com/fastpay/application/service/RegisterPixKeyService.java
+index f146e60..fa56e65 100644
+--- a/src/main/java/com/fastpay/application/service/RegisterPixKeyService.java
++++ b/src/main/java/com/fastpay/application/service/RegisterPixKeyService.java
+@@ -1,4 +1,42 @@
+ package com.fastpay.application.service;
+ 
+-public class RegisterPixKeyService {
++
++import com.fastpay.domain.model.Account;
++import com.fastpay.domain.model.PixKey;
++import com.fastpay.domain.model.enums.KeyType;
++import com.fastpay.domain.port.in.RegisterPixKeyUseCase;
++import com.fastpay.domain.port.out.AccountDatabasePort;
++import com.fastpay.domain.port.out.PixKeyDatabasePort;
++import lombok.RequiredArgsConstructor;
++import org.springframework.stereotype.Service;
++
++import java.time.Instant;
++import java.util.UUID;
++
++@Service
++@RequiredArgsConstructor
++public class RegisterPixKeyService implements RegisterPixKeyUseCase {
++
++    private final PixKeyDatabasePort pixKeyDatabasePort;
++    private final AccountDatabasePort accountDatabasePort;
++
++    @Override
++    public PixKey register(UUID accountId, KeyType type, String value) {
++        Account account = accountDatabasePort.findById(accountId)
++                .orElseThrow(() -> new IllegalArgumentException("Account not found for ID: " + accountId));
++
++        if (pixKeyDatabasePort.existsByValue(value)) {
++            throw new IllegalArgumentException("Pix key already exists: " + value);
++        }
++
++        PixKey pixKey = PixKey.builder()
++                .id(UUID.randomUUID())
++                .account(account)
++                .type(type)
++                .value(value)
++                .createdAt(Instant.now())
++                .build();
++
++        return pixKeyDatabasePort.save(pixKey);
++    }
+ }
+diff --git a/src/main/java/com/fastpay/domain/port/in/RegisterPixKeyUseCase.java b/src/main/java/com/fastpay/domain/port/in/RegisterPixKeyUseCase.java
+index 44d554e..f306b6b 100644
+--- a/src/main/java/com/fastpay/domain/port/in/RegisterPixKeyUseCase.java
++++ b/src/main/java/com/fastpay/domain/port/in/RegisterPixKeyUseCase.java
+@@ -1,4 +1,11 @@
+ package com.fastpay.domain.port.in;
+ 
+-public class RegisterPixKeyUseCase {
++import com.fastpay.domain.model.PixKey;
++import com.fastpay.domain.model.enums.KeyType;
++
++import java.util.UUID;
++
++public interface RegisterPixKeyUseCase {
++    PixKey register(UUID accountId, KeyType type, String value);
++
+ }
+diff --git a/src/main/java/com/fastpay/domain/port/out/AccountDatabasePort.java b/src/main/java/com/fastpay/domain/port/out/AccountDatabasePort.java
+new file mode 100644
+index 0000000..564a774
+--- /dev/null
++++ b/src/main/java/com/fastpay/domain/port/out/AccountDatabasePort.java
+@@ -0,0 +1,9 @@
++package com.fastpay.domain.port.out;
++
++import com.fastpay.domain.model.Account;
++import java.util.Optional;
++import java.util.UUID;
++
++public interface AccountDatabasePort {
++    Optional<Account> findById(UUID id);
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/domain/port/out/PixKeyDatabasePort.java b/src/main/java/com/fastpay/domain/port/out/PixKeyDatabasePort.java
+index fd5ab5d..546b62b 100644
+--- a/src/main/java/com/fastpay/domain/port/out/PixKeyDatabasePort.java
++++ b/src/main/java/com/fastpay/domain/port/out/PixKeyDatabasePort.java
+@@ -1,4 +1,8 @@
+ package com.fastpay.domain.port.out;
+ 
+-public class PixKeyDatabasePort {
++import com.fastpay.domain.model.PixKey;
++
++public interface PixKeyDatabasePort {
++    PixKey save(PixKey pixKey);
++    boolean existsByValue(String value);
+ }
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/adapter/AccountPostgresAdapter.java b/src/main/java/com/fastpay/infra/persistence/postgres/adapter/AccountPostgresAdapter.java
+new file mode 100644
+index 0000000..1529a19
+--- /dev/null
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/adapter/AccountPostgresAdapter.java
+@@ -0,0 +1,24 @@
++package com.fastpay.infra.persistence.postgres.adapter;
++
++import com.fastpay.domain.model.Account;
++import com.fastpay.domain.port.out.AccountDatabasePort;
++import com.fastpay.infra.persistence.postgres.mapper.AccountDatabaseMapper;
++import com.fastpay.infra.persistence.postgres.repository.SpringDataAccountRepository;
++import lombok.RequiredArgsConstructor;
++import org.springframework.stereotype.Component;
++
++import java.util.Optional;
++import java.util.UUID;
++
++@Component
++@RequiredArgsConstructor
++public class AccountPostgresAdapter implements AccountDatabasePort {
++
++    private final SpringDataAccountRepository repository;
++    private final AccountDatabaseMapper mapper;
++
++    @Override
++    public Optional<Account> findById(UUID id) {
++        return repository.findById(id).map(mapper::toDomain);
++    }
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/adapter/PixKeyPostgresAdapter.java b/src/main/java/com/fastpay/infra/persistence/postgres/adapter/PixKeyPostgresAdapter.java
+index bbc94cd..bd18ef7 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/adapter/PixKeyPostgresAdapter.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/adapter/PixKeyPostgresAdapter.java
+@@ -1,4 +1,30 @@
+ package com.fastpay.infra.persistence.postgres.adapter;
+ 
+-public class PixKeyPostgresAdapter {
+-}
++import com.fastpay.domain.model.PixKey;
++import com.fastpay.domain.port.out.PixKeyDatabasePort;
++import com.fastpay.infra.persistence.postgres.entity.PixKeyEntity;
++import com.fastpay.infra.persistence.postgres.mapper.PixKeyDatabaseMapper;
++import com.fastpay.infra.persistence.postgres.repository.SpringDataPixKeyRepository;
++import lombok.RequiredArgsConstructor;
++import org.springframework.stereotype.Component;
++
++
++@Component
++@RequiredArgsConstructor
++public class PixKeyPostgresAdapter implements PixKeyDatabasePort {
++
++    private final SpringDataPixKeyRepository repository;
++    private final PixKeyDatabaseMapper mapper;
++
++    @Override
++    public PixKey save(PixKey pixKey) {
++        PixKeyEntity entity = mapper.toEntity(pixKey);
++        PixKeyEntity savedEntity = repository.save(entity);
++        return mapper.toDomain(savedEntity);
++    }
++
++    @Override
++    public boolean existsByValue(String value) {
++        return repository.existsByValue(value);
++    }
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/entity/AccountEntity.java b/src/main/java/com/fastpay/infra/persistence/postgres/entity/AccountEntity.java
+index 36c9c97..80ad251 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/entity/AccountEntity.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/entity/AccountEntity.java
+@@ -1,4 +1,39 @@
+ package com.fastpay.infra.persistence.postgres.entity;
+ 
++import jakarta.persistence.Column;
++import jakarta.persistence.Entity;
++import jakarta.persistence.FetchType;
++import jakarta.persistence.Id;
++import jakarta.persistence.JoinColumn;
++import jakarta.persistence.ManyToOne;
++import jakarta.persistence.Table;
++import lombok.AllArgsConstructor;
++import lombok.Builder;
++import lombok.Getter;
++import lombok.NoArgsConstructor;
++import lombok.Setter;
++
++import java.util.UUID;
++
++@Entity
++@Table(name = "accounts")
++@Getter
++@Setter
++@Builder
++@NoArgsConstructor
++@AllArgsConstructor
+ public class AccountEntity {
+-}
++
++    @Id
++    private UUID id;
++    private String agency;
++    private String number;
++
++    @Column(name = "balance_in_cents")
++    private Long balanceInCents;
++
++    @ManyToOne(fetch = FetchType.LAZY)
++    @JoinColumn(name = "user_id")
++    private UserEntity user;
++
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/entity/PixKeyEntity.java b/src/main/java/com/fastpay/infra/persistence/postgres/entity/PixKeyEntity.java
+index 7bfc6db..e3c4e03 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/entity/PixKeyEntity.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/entity/PixKeyEntity.java
+@@ -1,4 +1,48 @@
+ package com.fastpay.infra.persistence.postgres.entity;
+ 
++import com.fastpay.domain.model.enums.KeyType;
++import jakarta.persistence.Column;
++import jakarta.persistence.Entity;
++import jakarta.persistence.EnumType;
++import jakarta.persistence.Enumerated;
++import jakarta.persistence.FetchType;
++import jakarta.persistence.Id;
++import jakarta.persistence.JoinColumn;
++import jakarta.persistence.ManyToOne;
++import jakarta.persistence.Table;
++import lombok.AllArgsConstructor;
++import lombok.Builder;
++import lombok.Getter;
++import lombok.NoArgsConstructor;
++import lombok.Setter;
++
++import java.time.Instant;
++import java.util.UUID;
++
++@Entity
++@Table(name = "pix_keys")
++@Getter
++@Setter
++@Builder
++@NoArgsConstructor
++@AllArgsConstructor
+ public class PixKeyEntity {
+-}
++
++    @Id
++    private UUID id;
++
++    @Enumerated(EnumType.STRING)
++    @Column(nullable = false)
++    private KeyType type;
++
++    @Column(unique = true, nullable = false)
++    private String value;
++
++    @Column(name = "created_at", nullable = false, updatable = false)
++    private Instant createdAt;
++
++    @ManyToOne(fetch = FetchType.LAZY)
++    @JoinColumn(name = "account_id")
++    private AccountEntity account;
++
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/entity/UserEntity.java b/src/main/java/com/fastpay/infra/persistence/postgres/entity/UserEntity.java
+index 474e748..b31aac9 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/entity/UserEntity.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/entity/UserEntity.java
+@@ -1,4 +1,28 @@
+ package com.fastpay.infra.persistence.postgres.entity;
+ 
++import jakarta.persistence.Entity;
++import jakarta.persistence.Id;
++import jakarta.persistence.Table;
++import lombok.AllArgsConstructor;
++import lombok.Builder;
++import lombok.Getter;
++import lombok.NoArgsConstructor;
++import lombok.Setter;
++
++import java.util.UUID;
++
++@Entity
++@Table(name = "users")
++@Getter
++@Setter
++@Builder
++@NoArgsConstructor
++@AllArgsConstructor
+ public class UserEntity {
+-}
++
++    @Id
++    private UUID id;
++    private String name;
++    private String document;
++
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/mapper/AccountDatabaseMapper.java b/src/main/java/com/fastpay/infra/persistence/postgres/mapper/AccountDatabaseMapper.java
+new file mode 100644
+index 0000000..df9d0e3
+--- /dev/null
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/mapper/AccountDatabaseMapper.java
+@@ -0,0 +1,11 @@
++package com.fastpay.infra.persistence.postgres.mapper;
++
++import com.fastpay.domain.model.Account;
++import com.fastpay.infra.persistence.postgres.entity.AccountEntity;
++import org.mapstruct.Mapper;
++
++@Mapper(componentModel = "spring")
++public interface AccountDatabaseMapper {
++    AccountEntity toEntity(Account domain);
++    Account toDomain(AccountEntity entity);
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/mapper/PixKeyDatabaseMapper.java b/src/main/java/com/fastpay/infra/persistence/postgres/mapper/PixKeyDatabaseMapper.java
+index 39043bc..f139f74 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/mapper/PixKeyDatabaseMapper.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/mapper/PixKeyDatabaseMapper.java
+@@ -1,4 +1,11 @@
+ package com.fastpay.infra.persistence.postgres.mapper;
+ 
+-public class PixKeyDatabaseMapper {
+-}
++import com.fastpay.domain.model.PixKey;
++import com.fastpay.infra.persistence.postgres.entity.PixKeyEntity;
++import org.mapstruct.Mapper;
++
++@Mapper(componentModel = "spring", uses = {AccountDatabaseMapper.class})
++public interface PixKeyDatabaseMapper {
++    PixKeyEntity toEntity(PixKey domain);
++    PixKey toDomain(PixKeyEntity entity);
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataAccountRepository.java b/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataAccountRepository.java
+new file mode 100644
+index 0000000..c6149d9
+--- /dev/null
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataAccountRepository.java
+@@ -0,0 +1,9 @@
++package com.fastpay.infra.persistence.postgres.repository;
++
++import com.fastpay.infra.persistence.postgres.entity.AccountEntity;
++import org.springframework.data.jpa.repository.JpaRepository;
++
++import java.util.UUID;
++
++public interface SpringDataAccountRepository extends JpaRepository<AccountEntity, UUID> {
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataPixKeyRepository.java b/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataPixKeyRepository.java
+index 61ce2e6..332ca4d 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataPixKeyRepository.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataPixKeyRepository.java
+@@ -1,4 +1,10 @@
+ package com.fastpay.infra.persistence.postgres.repository;
+ 
+-public class SpringDataPixKeyRepository {
+-}
++import com.fastpay.infra.persistence.postgres.entity.PixKeyEntity;
++import org.springframework.data.jpa.repository.JpaRepository;
++
++import java.util.UUID;
++
++public interface SpringDataPixKeyRepository extends JpaRepository<PixKeyEntity, UUID> {
++    boolean existsByValue(String value);
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/presentation/controller/PixKeyController.java b/src/main/java/com/fastpay/presentation/controller/PixKeyController.java
+index 41892b1..1753d12 100644
+--- a/src/main/java/com/fastpay/presentation/controller/PixKeyController.java
++++ b/src/main/java/com/fastpay/presentation/controller/PixKeyController.java
+@@ -1,4 +1,41 @@
+ package com.fastpay.presentation.controller;
+ 
++import com.fastpay.domain.model.PixKey;
++import com.fastpay.domain.port.in.RegisterPixKeyUseCase;
++import com.fastpay.presentation.controller.request.PixKeyRequest;
++import com.fastpay.presentation.controller.response.PixKeyResponse;
++import com.fastpay.presentation.mapper.PixWebMapper;
++import jakarta.validation.Valid;
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.PostMapping;
++import org.springframework.web.bind.annotation.RequestBody;
++import org.springframework.web.bind.annotation.RequestMapping;
++import org.springframework.web.bind.annotation.RestController;
++
++@Slf4j
++@RestController
++@RequestMapping("/api/v1/keys")
++@RequiredArgsConstructor
+ public class PixKeyController {
+-}
++
++    private final RegisterPixKeyUseCase registerPixKeyUseCase;
++    private final PixWebMapper mapper;
++
++    @PostMapping
++    public ResponseEntity<PixKeyResponse> register(
++            @RequestBody @Valid PixKeyRequest request
++    ) {
++
++        PixKey registeredKey = registerPixKeyUseCase.register(
++                request.accountId(),
++                request.type(),
++                request.value()
++        );
++
++        PixKeyResponse response = mapper.toResponse(registeredKey);
++        return ResponseEntity.status(HttpStatus.CREATED).body(response);
++    }
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/presentation/controller/request/PixKeyRequest.java b/src/main/java/com/fastpay/presentation/controller/request/PixKeyRequest.java
+index be3a12b..4119485 100644
+--- a/src/main/java/com/fastpay/presentation/controller/request/PixKeyRequest.java
++++ b/src/main/java/com/fastpay/presentation/controller/request/PixKeyRequest.java
+@@ -1,4 +1,20 @@
+ package com.fastpay.presentation.controller.request;
+ 
+-public class PixKeyRequest {
+-}
++import com.fastpay.domain.model.enums.KeyType;
++import jakarta.validation.constraints.NotBlank;
++import jakarta.validation.constraints.NotNull;
++
++
++import java.util.UUID;
++
++public record PixKeyRequest (
++
++    @NotNull(message = "Account ID is mandatory")
++    UUID accountId,
++
++    @NotNull(message = "Key type is mandatory")
++    KeyType type,
++
++    @NotBlank(message = "Key value is mandatory")
++    String value
++) { }
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/presentation/controller/response/PixKeyResponse.java b/src/main/java/com/fastpay/presentation/controller/response/PixKeyResponse.java
+index ea7c027..d857787 100644
+--- a/src/main/java/com/fastpay/presentation/controller/response/PixKeyResponse.java
++++ b/src/main/java/com/fastpay/presentation/controller/response/PixKeyResponse.java
+@@ -1,4 +1,15 @@
+ package com.fastpay.presentation.controller.response;
+ 
++import com.fastpay.domain.model.enums.KeyType;
++import lombok.Data;
++
++import java.time.Instant;
++import java.util.UUID;
++
++@Data
+ public class PixKeyResponse {
+-}
++    private UUID id;
++    private KeyType type;
++    private String value;
++    private Instant createdAt;
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/presentation/mapper/PixWebMapper.java b/src/main/java/com/fastpay/presentation/mapper/PixWebMapper.java
+index eca4418..73bf9ff 100644
+--- a/src/main/java/com/fastpay/presentation/mapper/PixWebMapper.java
++++ b/src/main/java/com/fastpay/presentation/mapper/PixWebMapper.java
+@@ -1,4 +1,10 @@
+ package com.fastpay.presentation.mapper;
+ 
+-public class PixWebMapper {
+-}
++import com.fastpay.domain.model.PixKey;
++import com.fastpay.presentation.controller.response.PixKeyResponse;
++import org.mapstruct.Mapper;
++
++@Mapper(componentModel = "spring")
++public interface PixWebMapper {
++    PixKeyResponse toResponse(PixKey domain);
++}
+\ No newline at end of file
+diff --git a/src/main/resources/application.yml b/src/main/resources/application.yml
+index c48e868..f25b474 100644
+--- a/src/main/resources/application.yml
++++ b/src/main/resources/application.yml
+@@ -1,3 +1,22 @@
+ spring:
+   application:
+     name: fastpay
++
++  datasource:
++    url: jdbc:postgresql://${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
++    username: ${POSTGRES_USER}
++    password: ${POSTGRES_PASSWORD}
++    driver-class-name: org.postgresql.Driver
++
++  jpa:
++    show-sql: true
++    open-in-view: true
++    hibernate:
++      ddl-auto: create
++    properties:
++      hibernate:
++        format_sql: true
++
++springdoc:
++  swagger-ui:
++    path: /docs
+diff --git a/Dockerfile b/Dockerfile
+new file mode 100644
+index 0000000..6f8df84
+--- /dev/null
++++ b/Dockerfile
+@@ -0,0 +1,18 @@
++FROM gradle:9.3.0-jdk21-jammy AS build
++WORKDIR /app
++
++COPY build.gradle settings.gradle ./
++COPY gradle.properties* ./
++COPY gradle ./gradle
++
++RUN gradle dependencies --no-daemon || true
++
++COPY src ./src
++RUN gradle build --no-daemon -x test
++
++FROM eclipse-temurin:21-jre-jammy
++WORKDIR /app
++COPY --from=build /app/build/libs/*.jar app.jar
++
++EXPOSE 8080
++ENTRYPOINT ["java", "-jar", "app.jar"]
+\ No newline at end of file
+diff --git a/build.gradle b/build.gradle
+index 7e9e596..17ae564 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -25,6 +25,11 @@ repositories {
+ }
+ 
+ dependencies {
++    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:3.0.1'
++    implementation 'org.mapstruct:mapstruct:1.6.3'
++    implementation 'org.springframework.boot:spring-boot-starter-actuator'
++    implementation 'jakarta.validation:jakarta.validation-api:3.1.1'
++
+     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+     implementation 'org.springframework.boot:spring-boot-starter-flyway'
+     implementation 'org.springframework.boot:spring-boot-starter-kafka'
+@@ -33,6 +38,10 @@ dependencies {
+     compileOnly 'org.projectlombok:lombok'
+     runtimeOnly 'org.postgresql:postgresql'
+     annotationProcessor 'org.projectlombok:lombok'
++
++    annotationProcessor 'org.mapstruct:mapstruct-processor:1.6.3'
++    annotationProcessor 'org.projectlombok:lombok-mapstruct-binding:0.2.0'
++
+     testImplementation 'org.springframework.boot:spring-boot-starter-data-jpa-test'
+     testImplementation 'org.springframework.boot:spring-boot-starter-flyway-test'
+     testImplementation 'org.springframework.boot:spring-boot-starter-kafka-test'
+diff --git a/docker-compose.yml b/docker-compose.yml
+index a99ba0b..3a4e94d 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -1,4 +1,28 @@
+ services:
++  app:
++    image: fastpay:latest
++    networks:
++      - fastpay-network
++    build:
++      context: .
++    container_name: fastpay-app
++    restart: always
++    ports:
++      - "8080:8080"
++    depends_on:
++      postgres:
++        condition: service_healthy
++      kafka:
++        condition: service_healthy
++    env_file:
++      - .env
++    healthcheck:
++      test: [ "CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1" ]
++      interval: 10s
++      timeout: 5s
++      retries: 5
++      start_period: 30s
++
+   postgres:
+     image: postgres:18-alpine
+     container_name: fastpay-postgres
+@@ -11,6 +35,11 @@ services:
+       - fastpay_pgdata:/var/lib/postgresql/data
+     networks:
+       - fastpay-network
++    healthcheck:
++      test: [ "CMD", "pg_isready", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}" ]
++      interval: 5s
++      timeout: 5s
++      retries: 5
+ 
+   kafka:
+     image: confluentinc/cp-kafka:8.0.3
+@@ -24,6 +53,12 @@ services:
+       - fastpay_kafka_data:/var/lib/kafka/data
+     networks:
+       - fastpay-network
++    healthcheck:
++      test: [ "CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list" ]
++      interval: 10s
++      timeout: 5s
++      retries: 5
++      start_period: 15s
+ 
+ networks:
+   fastpay-network:
+diff --git a/src/main/java/com/fastpay/application/service/RegisterPixKeyService.java b/src/main/java/com/fastpay/application/service/RegisterPixKeyService.java
+index f146e60..fa56e65 100644
+--- a/src/main/java/com/fastpay/application/service/RegisterPixKeyService.java
++++ b/src/main/java/com/fastpay/application/service/RegisterPixKeyService.java
+@@ -1,4 +1,42 @@
+ package com.fastpay.application.service;
+ 
+-public class RegisterPixKeyService {
++
++import com.fastpay.domain.model.Account;
++import com.fastpay.domain.model.PixKey;
++import com.fastpay.domain.model.enums.KeyType;
++import com.fastpay.domain.port.in.RegisterPixKeyUseCase;
++import com.fastpay.domain.port.out.AccountDatabasePort;
++import com.fastpay.domain.port.out.PixKeyDatabasePort;
++import lombok.RequiredArgsConstructor;
++import org.springframework.stereotype.Service;
++
++import java.time.Instant;
++import java.util.UUID;
++
++@Service
++@RequiredArgsConstructor
++public class RegisterPixKeyService implements RegisterPixKeyUseCase {
++
++    private final PixKeyDatabasePort pixKeyDatabasePort;
++    private final AccountDatabasePort accountDatabasePort;
++
++    @Override
++    public PixKey register(UUID accountId, KeyType type, String value) {
++        Account account = accountDatabasePort.findById(accountId)
++                .orElseThrow(() -> new IllegalArgumentException("Account not found for ID: " + accountId));
++
++        if (pixKeyDatabasePort.existsByValue(value)) {
++            throw new IllegalArgumentException("Pix key already exists: " + value);
++        }
++
++        PixKey pixKey = PixKey.builder()
++                .id(UUID.randomUUID())
++                .account(account)
++                .type(type)
++                .value(value)
++                .createdAt(Instant.now())
++                .build();
++
++        return pixKeyDatabasePort.save(pixKey);
++    }
+ }
+diff --git a/src/main/java/com/fastpay/application/service/SendPixService.java b/src/main/java/com/fastpay/application/service/SendPixService.java
+index f97e21c..faaf64e 100644
+--- a/src/main/java/com/fastpay/application/service/SendPixService.java
++++ b/src/main/java/com/fastpay/application/service/SendPixService.java
+@@ -1,4 +1,66 @@
+ package com.fastpay.application.service;
+ 
+-public class SendPixService {
+-}
++import com.fastpay.domain.exception.InsufficientBalanceException;
++import com.fastpay.domain.exception.KeyNotFoundException;
++import com.fastpay.domain.model.Account;
++import com.fastpay.domain.model.PixKey;
++import com.fastpay.domain.model.Transaction;
++import com.fastpay.domain.model.enums.TransactionStatus;
++import com.fastpay.domain.port.in.SendPixUseCase;
++import com.fastpay.domain.port.out.AccountDatabasePort;
++import com.fastpay.domain.port.out.PixKeyDatabasePort;
++import com.fastpay.domain.port.out.TransactionDatabasePort;
++import lombok.RequiredArgsConstructor;
++import org.springframework.stereotype.Service;
++import org.springframework.transaction.annotation.Transactional;
++
++import java.time.Instant;
++import java.util.UUID;
++
++@Service
++@RequiredArgsConstructor
++public class SendPixService implements SendPixUseCase {
++
++    private final AccountDatabasePort accountDatabasePort;
++    private final PixKeyDatabasePort pixKeyDatabasePort;
++    private final TransactionDatabasePort transactionDatabasePort;
++
++    @Override
++    @Transactional
++    public Transaction send(UUID senderAccountId, String destinationKey, Long amountInCents) {
++
++        Account senderAccount = accountDatabasePort.findById(senderAccountId)
++                .orElseThrow(() -> new IllegalArgumentException("Sender account not found"));
++
++        PixKey destinationPixKey = pixKeyDatabasePort.findByValue(destinationKey)
++                .orElseThrow(() -> new KeyNotFoundException("Destination Pix key not found: " + destinationKey));
++
++        Account receiverAccount = destinationPixKey.getAccount();
++
++        if (senderAccount.getId().equals(receiverAccount.getId())) {
++            throw new IllegalArgumentException("Cannot transfer to the same account");
++        }
++
++        try {
++            senderAccount.debit(amountInCents);
++        } catch (IllegalStateException e) {
++            throw new InsufficientBalanceException("Insufficient balance to complete the transfer");
++        }
++
++        receiverAccount.credit(amountInCents);
++
++        accountDatabasePort.update(senderAccount);
++        accountDatabasePort.update(receiverAccount);
++
++        Transaction transaction = Transaction.builder()
++                .id(UUID.randomUUID())
++                .sender(senderAccount)
++                .receiver(receiverAccount)
++                .amountInCents(amountInCents)
++                .status(TransactionStatus.PROCESSING)
++                .timestamp(Instant.now())
++                .build();
++
++        return transactionDatabasePort.save(transaction);
++    }
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/domain/exception/InsufficientBalanceException.java b/src/main/java/com/fastpay/domain/exception/InsufficientBalanceException.java
+index 3ef81a4..d7687ea 100644
+--- a/src/main/java/com/fastpay/domain/exception/InsufficientBalanceException.java
++++ b/src/main/java/com/fastpay/domain/exception/InsufficientBalanceException.java
+@@ -1,4 +1,7 @@
+ package com.fastpay.domain.exception;
+ 
+-public class InsufficientBalanceException {
++public class InsufficientBalanceException extends RuntimeException {
++    public InsufficientBalanceException(String message) {
++        super(message);
++    }
+ }
+diff --git a/src/main/java/com/fastpay/domain/exception/KeyNotFoundException.java b/src/main/java/com/fastpay/domain/exception/KeyNotFoundException.java
+index 6172709..fac957c 100644
+--- a/src/main/java/com/fastpay/domain/exception/KeyNotFoundException.java
++++ b/src/main/java/com/fastpay/domain/exception/KeyNotFoundException.java
+@@ -1,4 +1,7 @@
+ package com.fastpay.domain.exception;
+ 
+-public class KeyNotFoundException {
++public class KeyNotFoundException extends RuntimeException {
++    public KeyNotFoundException(String message) {
++        super(message);
++    }
+ }
+diff --git a/src/main/java/com/fastpay/domain/port/in/RegisterPixKeyUseCase.java b/src/main/java/com/fastpay/domain/port/in/RegisterPixKeyUseCase.java
+index 44d554e..f306b6b 100644
+--- a/src/main/java/com/fastpay/domain/port/in/RegisterPixKeyUseCase.java
++++ b/src/main/java/com/fastpay/domain/port/in/RegisterPixKeyUseCase.java
+@@ -1,4 +1,11 @@
+ package com.fastpay.domain.port.in;
+ 
+-public class RegisterPixKeyUseCase {
++import com.fastpay.domain.model.PixKey;
++import com.fastpay.domain.model.enums.KeyType;
++
++import java.util.UUID;
++
++public interface RegisterPixKeyUseCase {
++    PixKey register(UUID accountId, KeyType type, String value);
++
+ }
+diff --git a/src/main/java/com/fastpay/domain/port/in/SendPixUseCase.java b/src/main/java/com/fastpay/domain/port/in/SendPixUseCase.java
+index 3cb6c9d..c8f0c5c 100644
+--- a/src/main/java/com/fastpay/domain/port/in/SendPixUseCase.java
++++ b/src/main/java/com/fastpay/domain/port/in/SendPixUseCase.java
+@@ -1,4 +1,9 @@
+ package com.fastpay.domain.port.in;
+ 
+-public class SendPixUseCase {
++import com.fastpay.domain.model.Transaction;
++
++import java.util.UUID;
++
++public interface SendPixUseCase {
++    Transaction send(UUID senderAccountId, String destinationKey, Long amountInCents);
+ }
+diff --git a/src/main/java/com/fastpay/domain/port/out/AccountDatabasePort.java b/src/main/java/com/fastpay/domain/port/out/AccountDatabasePort.java
+new file mode 100644
+index 0000000..a1fd2da
+--- /dev/null
++++ b/src/main/java/com/fastpay/domain/port/out/AccountDatabasePort.java
+@@ -0,0 +1,12 @@
++package com.fastpay.domain.port.out;
++
++import com.fastpay.domain.model.Account;
++
++import java.util.Optional;
++import java.util.UUID;
++
++public interface AccountDatabasePort {
++    Optional<Account> findById(UUID id);
++
++    Account update(Account account);
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/domain/port/out/PixKeyDatabasePort.java b/src/main/java/com/fastpay/domain/port/out/PixKeyDatabasePort.java
+index fd5ab5d..3bb021e 100644
+--- a/src/main/java/com/fastpay/domain/port/out/PixKeyDatabasePort.java
++++ b/src/main/java/com/fastpay/domain/port/out/PixKeyDatabasePort.java
+@@ -1,4 +1,13 @@
+ package com.fastpay.domain.port.out;
+ 
+-public class PixKeyDatabasePort {
++import com.fastpay.domain.model.PixKey;
++
++import java.util.Optional;
++
++public interface PixKeyDatabasePort {
++    PixKey save(PixKey pixKey);
++
++    boolean existsByValue(String value);
++
++    Optional<PixKey> findByValue(String value);
+ }
+diff --git a/src/main/java/com/fastpay/domain/port/out/SettlementMessagingPort.java b/src/main/java/com/fastpay/domain/port/out/SettlementMessagingPort.java
+index a64680e..b3b10df 100644
+--- a/src/main/java/com/fastpay/domain/port/out/SettlementMessagingPort.java
++++ b/src/main/java/com/fastpay/domain/port/out/SettlementMessagingPort.java
+@@ -1,4 +1,4 @@
+ package com.fastpay.domain.port.out;
+ 
+-public class SettlementMessagingPort {
++public interface SettlementMessagingPort {
+ }
+diff --git a/src/main/java/com/fastpay/domain/port/out/TransactionDatabasePort.java b/src/main/java/com/fastpay/domain/port/out/TransactionDatabasePort.java
+index 3095e56..cbc24fc 100644
+--- a/src/main/java/com/fastpay/domain/port/out/TransactionDatabasePort.java
++++ b/src/main/java/com/fastpay/domain/port/out/TransactionDatabasePort.java
+@@ -1,4 +1,7 @@
+ package com.fastpay.domain.port.out;
+ 
+-public class TransactionDatabasePort {
+-}
++import com.fastpay.domain.model.Transaction;
++
++public interface TransactionDatabasePort {
++    Transaction save(Transaction transaction);
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/adapter/AccountPostgresAdapter.java b/src/main/java/com/fastpay/infra/persistence/postgres/adapter/AccountPostgresAdapter.java
+new file mode 100644
+index 0000000..19b98ec
+--- /dev/null
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/adapter/AccountPostgresAdapter.java
+@@ -0,0 +1,29 @@
++package com.fastpay.infra.persistence.postgres.adapter;
++
++import com.fastpay.domain.model.Account;
++import com.fastpay.domain.port.out.AccountDatabasePort;
++import com.fastpay.infra.persistence.postgres.mapper.AccountDatabaseMapper;
++import com.fastpay.infra.persistence.postgres.repository.SpringDataAccountRepository;
++import lombok.RequiredArgsConstructor;
++import org.springframework.stereotype.Component;
++
++import java.util.Optional;
++import java.util.UUID;
++
++@Component
++@RequiredArgsConstructor
++public class AccountPostgresAdapter implements AccountDatabasePort {
++
++    private final SpringDataAccountRepository repository;
++    private final AccountDatabaseMapper mapper;
++
++    @Override
++    public Optional<Account> findById(UUID id) {
++        return repository.findById(id).map(mapper::toDomain);
++    }
++
++    @Override
++    public Account update(Account account) {
++        return mapper.toDomain(repository.save(mapper.toEntity(account)));
++    }
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/adapter/PixKeyPostgresAdapter.java b/src/main/java/com/fastpay/infra/persistence/postgres/adapter/PixKeyPostgresAdapter.java
+index bbc94cd..34bae93 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/adapter/PixKeyPostgresAdapter.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/adapter/PixKeyPostgresAdapter.java
+@@ -1,4 +1,37 @@
+ package com.fastpay.infra.persistence.postgres.adapter;
+ 
+-public class PixKeyPostgresAdapter {
+-}
++import com.fastpay.domain.model.PixKey;
++import com.fastpay.domain.port.out.PixKeyDatabasePort;
++import com.fastpay.infra.persistence.postgres.entity.PixKeyEntity;
++import com.fastpay.infra.persistence.postgres.mapper.PixKeyDatabaseMapper;
++import com.fastpay.infra.persistence.postgres.repository.SpringDataPixKeyRepository;
++import lombok.RequiredArgsConstructor;
++import org.springframework.stereotype.Component;
++
++import java.util.Optional;
++
++
++@Component
++@RequiredArgsConstructor
++public class PixKeyPostgresAdapter implements PixKeyDatabasePort {
++
++    private final SpringDataPixKeyRepository repository;
++    private final PixKeyDatabaseMapper mapper;
++
++    @Override
++    public PixKey save(PixKey pixKey) {
++        PixKeyEntity entity = mapper.toEntity(pixKey);
++        PixKeyEntity savedEntity = repository.save(entity);
++        return mapper.toDomain(savedEntity);
++    }
++
++    @Override
++    public boolean existsByValue(String value) {
++        return repository.existsByValue(value);
++    }
++
++    @Override
++    public Optional<PixKey> findByValue(String value) {
++        return repository.findByValue(value).map(mapper::toDomain);
++    }
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/adapter/TransactionPostgresAdapter.java b/src/main/java/com/fastpay/infra/persistence/postgres/adapter/TransactionPostgresAdapter.java
+index b8951be..5d3ea12 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/adapter/TransactionPostgresAdapter.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/adapter/TransactionPostgresAdapter.java
+@@ -1,4 +1,21 @@
+ package com.fastpay.infra.persistence.postgres.adapter;
+ 
+-public class TransactionPostgresAdapter {
+-}
++import com.fastpay.domain.model.Transaction;
++import com.fastpay.domain.port.out.TransactionDatabasePort;
++import com.fastpay.infra.persistence.postgres.mapper.TransactionDatabaseMapper;
++import com.fastpay.infra.persistence.postgres.repository.SpringDataTransactionRepository;
++import lombok.RequiredArgsConstructor;
++import org.springframework.stereotype.Component;
++
++@Component
++@RequiredArgsConstructor
++public class TransactionPostgresAdapter implements TransactionDatabasePort {
++
++    private final SpringDataTransactionRepository repository;
++    private final TransactionDatabaseMapper mapper;
++
++    @Override
++    public Transaction save(Transaction transaction) {
++        return mapper.toDomain(repository.save(mapper.toEntity(transaction)));
++    }
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/entity/AccountEntity.java b/src/main/java/com/fastpay/infra/persistence/postgres/entity/AccountEntity.java
+index 36c9c97..1cc8a2d 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/entity/AccountEntity.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/entity/AccountEntity.java
+@@ -1,4 +1,29 @@
+ package com.fastpay.infra.persistence.postgres.entity;
+ 
++import jakarta.persistence.*;
++import lombok.*;
++
++import java.util.UUID;
++
++@Entity
++@Table(name = "accounts")
++@Getter
++@Setter
++@Builder
++@NoArgsConstructor
++@AllArgsConstructor
+ public class AccountEntity {
+-}
++
++    @Id
++    private UUID id;
++    private String agency;
++    private String number;
++
++    @Column(name = "balance_in_cents")
++    private Long balanceInCents;
++
++    @ManyToOne(fetch = FetchType.LAZY)
++    @JoinColumn(name = "user_id")
++    private UserEntity user;
++
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/entity/PixKeyEntity.java b/src/main/java/com/fastpay/infra/persistence/postgres/entity/PixKeyEntity.java
+index 7bfc6db..dd73999 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/entity/PixKeyEntity.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/entity/PixKeyEntity.java
+@@ -1,4 +1,36 @@
+ package com.fastpay.infra.persistence.postgres.entity;
+ 
++import com.fastpay.domain.model.enums.KeyType;
++import jakarta.persistence.*;
++import lombok.*;
++
++import java.time.Instant;
++import java.util.UUID;
++
++@Entity
++@Table(name = "pix_keys")
++@Getter
++@Setter
++@Builder
++@NoArgsConstructor
++@AllArgsConstructor
+ public class PixKeyEntity {
+-}
++
++    @Id
++    private UUID id;
++
++    @Enumerated(EnumType.STRING)
++    @Column(nullable = false)
++    private KeyType type;
++
++    @Column(unique = true, nullable = false)
++    private String value;
++
++    @Column(name = "created_at", nullable = false, updatable = false)
++    private Instant createdAt;
++
++    @ManyToOne(fetch = FetchType.LAZY)
++    @JoinColumn(name = "account_id")
++    private AccountEntity account;
++
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/entity/TransactionEntity.java b/src/main/java/com/fastpay/infra/persistence/postgres/entity/TransactionEntity.java
+index a6b2e11..6f054e0 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/entity/TransactionEntity.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/entity/TransactionEntity.java
+@@ -1,4 +1,39 @@
+ package com.fastpay.infra.persistence.postgres.entity;
+ 
++import com.fastpay.domain.model.enums.TransactionStatus;
++import jakarta.persistence.*;
++import lombok.*;
++
++import java.time.Instant;
++import java.util.UUID;
++
++@Entity
++@Table(name = "transactions")
++@Getter
++@Setter
++@Builder
++@NoArgsConstructor
++@AllArgsConstructor
+ public class TransactionEntity {
+-}
++
++    @Id
++    private UUID id;
++
++    @Column(name = "amount_in_cents", nullable = false)
++    private Long amountInCents;
++
++    @Enumerated(EnumType.STRING)
++    @Column(nullable = false)
++    private TransactionStatus status;
++
++    @Column(nullable = false, updatable = false)
++    private Instant timestamp;
++
++    @ManyToOne(fetch = FetchType.LAZY)
++    @JoinColumn(name = "sender_account_id", nullable = false)
++    private AccountEntity sender;
++
++    @ManyToOne(fetch = FetchType.LAZY)
++    @JoinColumn(name = "receiver_account_id", nullable = false)
++    private AccountEntity receiver;
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/entity/UserEntity.java b/src/main/java/com/fastpay/infra/persistence/postgres/entity/UserEntity.java
+index 474e748..ff2f065 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/entity/UserEntity.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/entity/UserEntity.java
+@@ -1,4 +1,24 @@
+ package com.fastpay.infra.persistence.postgres.entity;
+ 
++import jakarta.persistence.Entity;
++import jakarta.persistence.Id;
++import jakarta.persistence.Table;
++import lombok.*;
++
++import java.util.UUID;
++
++@Entity
++@Table(name = "users")
++@Getter
++@Setter
++@Builder
++@NoArgsConstructor
++@AllArgsConstructor
+ public class UserEntity {
+-}
++
++    @Id
++    private UUID id;
++    private String name;
++    private String document;
++
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/mapper/AccountDatabaseMapper.java b/src/main/java/com/fastpay/infra/persistence/postgres/mapper/AccountDatabaseMapper.java
+new file mode 100644
+index 0000000..d17f5b0
+--- /dev/null
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/mapper/AccountDatabaseMapper.java
+@@ -0,0 +1,12 @@
++package com.fastpay.infra.persistence.postgres.mapper;
++
++import com.fastpay.domain.model.Account;
++import com.fastpay.infra.persistence.postgres.entity.AccountEntity;
++import org.mapstruct.Mapper;
++
++@Mapper(componentModel = "spring")
++public interface AccountDatabaseMapper {
++    AccountEntity toEntity(Account domain);
++
++    Account toDomain(AccountEntity entity);
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/mapper/PixKeyDatabaseMapper.java b/src/main/java/com/fastpay/infra/persistence/postgres/mapper/PixKeyDatabaseMapper.java
+index 39043bc..ec41360 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/mapper/PixKeyDatabaseMapper.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/mapper/PixKeyDatabaseMapper.java
+@@ -1,4 +1,12 @@
+ package com.fastpay.infra.persistence.postgres.mapper;
+ 
+-public class PixKeyDatabaseMapper {
+-}
++import com.fastpay.domain.model.PixKey;
++import com.fastpay.infra.persistence.postgres.entity.PixKeyEntity;
++import org.mapstruct.Mapper;
++
++@Mapper(componentModel = "spring", uses = {AccountDatabaseMapper.class})
++public interface PixKeyDatabaseMapper {
++    PixKeyEntity toEntity(PixKey domain);
++
++    PixKey toDomain(PixKeyEntity entity);
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/mapper/TransactionDatabaseMapper.java b/src/main/java/com/fastpay/infra/persistence/postgres/mapper/TransactionDatabaseMapper.java
+index b5f7ccb..cb0a472 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/mapper/TransactionDatabaseMapper.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/mapper/TransactionDatabaseMapper.java
+@@ -1,4 +1,12 @@
+ package com.fastpay.infra.persistence.postgres.mapper;
+ 
+-public class TransactionDatabaseMapper {
+-}
++import com.fastpay.domain.model.Transaction;
++import com.fastpay.infra.persistence.postgres.entity.TransactionEntity;
++import org.mapstruct.Mapper;
++
++@Mapper(componentModel = "spring", uses = {AccountDatabaseMapper.class})
++public interface TransactionDatabaseMapper {
++    TransactionEntity toEntity(Transaction domain);
++
++    Transaction toDomain(TransactionEntity entity);
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataAccountRepository.java b/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataAccountRepository.java
+new file mode 100644
+index 0000000..c6149d9
+--- /dev/null
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataAccountRepository.java
+@@ -0,0 +1,9 @@
++package com.fastpay.infra.persistence.postgres.repository;
++
++import com.fastpay.infra.persistence.postgres.entity.AccountEntity;
++import org.springframework.data.jpa.repository.JpaRepository;
++
++import java.util.UUID;
++
++public interface SpringDataAccountRepository extends JpaRepository<AccountEntity, UUID> {
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataPixKeyRepository.java b/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataPixKeyRepository.java
+index 61ce2e6..d65012a 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataPixKeyRepository.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataPixKeyRepository.java
+@@ -1,4 +1,13 @@
+ package com.fastpay.infra.persistence.postgres.repository;
+ 
+-public class SpringDataPixKeyRepository {
+-}
++import com.fastpay.infra.persistence.postgres.entity.PixKeyEntity;
++import org.springframework.data.jpa.repository.JpaRepository;
++
++import java.util.Optional;
++import java.util.UUID;
++
++public interface SpringDataPixKeyRepository extends JpaRepository<PixKeyEntity, UUID> {
++    boolean existsByValue(String value);
++
++    Optional<PixKeyEntity> findByValue(String value);
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataTransactionRepository.java b/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataTransactionRepository.java
+index 47f4e02..8ced792 100644
+--- a/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataTransactionRepository.java
++++ b/src/main/java/com/fastpay/infra/persistence/postgres/repository/SpringDataTransactionRepository.java
+@@ -1,4 +1,9 @@
+ package com.fastpay.infra.persistence.postgres.repository;
+ 
+-public class SpringDataTransactionRepository {
++import com.fastpay.infra.persistence.postgres.entity.TransactionEntity;
++import org.springframework.data.jpa.repository.JpaRepository;
++
++import java.util.UUID;
++
++public interface SpringDataTransactionRepository extends JpaRepository<TransactionEntity, UUID> {
+ }
+diff --git a/src/main/java/com/fastpay/presentation/controller/PixKeyController.java b/src/main/java/com/fastpay/presentation/controller/PixKeyController.java
+index 41892b1..1753d12 100644
+--- a/src/main/java/com/fastpay/presentation/controller/PixKeyController.java
++++ b/src/main/java/com/fastpay/presentation/controller/PixKeyController.java
+@@ -1,4 +1,41 @@
+ package com.fastpay.presentation.controller;
+ 
++import com.fastpay.domain.model.PixKey;
++import com.fastpay.domain.port.in.RegisterPixKeyUseCase;
++import com.fastpay.presentation.controller.request.PixKeyRequest;
++import com.fastpay.presentation.controller.response.PixKeyResponse;
++import com.fastpay.presentation.mapper.PixWebMapper;
++import jakarta.validation.Valid;
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.PostMapping;
++import org.springframework.web.bind.annotation.RequestBody;
++import org.springframework.web.bind.annotation.RequestMapping;
++import org.springframework.web.bind.annotation.RestController;
++
++@Slf4j
++@RestController
++@RequestMapping("/api/v1/keys")
++@RequiredArgsConstructor
+ public class PixKeyController {
+-}
++
++    private final RegisterPixKeyUseCase registerPixKeyUseCase;
++    private final PixWebMapper mapper;
++
++    @PostMapping
++    public ResponseEntity<PixKeyResponse> register(
++            @RequestBody @Valid PixKeyRequest request
++    ) {
++
++        PixKey registeredKey = registerPixKeyUseCase.register(
++                request.accountId(),
++                request.type(),
++                request.value()
++        );
++
++        PixKeyResponse response = mapper.toResponse(registeredKey);
++        return ResponseEntity.status(HttpStatus.CREATED).body(response);
++    }
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/presentation/controller/TransactionController.java b/src/main/java/com/fastpay/presentation/controller/TransactionController.java
+index af60d12..92c709c 100644
+--- a/src/main/java/com/fastpay/presentation/controller/TransactionController.java
++++ b/src/main/java/com/fastpay/presentation/controller/TransactionController.java
+@@ -1,4 +1,41 @@
+ package com.fastpay.presentation.controller;
+ 
++import com.fastpay.domain.model.Transaction;
++import com.fastpay.domain.port.in.SendPixUseCase;
++import com.fastpay.presentation.controller.request.TransferRequest;
++import com.fastpay.presentation.controller.response.TransferResponse;
++import com.fastpay.presentation.mapper.PixWebMapper;
++import jakarta.validation.Valid;
++import lombok.RequiredArgsConstructor;
++import lombok.extern.slf4j.Slf4j;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.PostMapping;
++import org.springframework.web.bind.annotation.RequestBody;
++import org.springframework.web.bind.annotation.RequestMapping;
++import org.springframework.web.bind.annotation.RestController;
++
++@Slf4j
++@RestController
++@RequestMapping("/api/v1/pix")
++@RequiredArgsConstructor
+ public class TransactionController {
+-}
++
++    private final SendPixUseCase sendPixUseCase;
++    private final PixWebMapper mapper;
++
++    @PostMapping("/transfer")
++    public ResponseEntity<TransferResponse> transfer(@RequestBody @Valid TransferRequest request) {
++        log.info("Received transfer request from account: {}", request.senderAccountId());
++
++        Transaction transaction = sendPixUseCase.send(
++                request.senderAccountId(),
++                request.destinationKey(),
++                request.amountInCents()
++        );
++
++        TransferResponse response = mapper.toResponse(transaction);
++
++        return ResponseEntity.status(HttpStatus.ACCEPTED).body(response);
++    }
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/presentation/controller/request/PixKeyRequest.java b/src/main/java/com/fastpay/presentation/controller/request/PixKeyRequest.java
+index be3a12b..df3c45f 100644
+--- a/src/main/java/com/fastpay/presentation/controller/request/PixKeyRequest.java
++++ b/src/main/java/com/fastpay/presentation/controller/request/PixKeyRequest.java
+@@ -1,4 +1,20 @@
+ package com.fastpay.presentation.controller.request;
+ 
+-public class PixKeyRequest {
+-}
++import com.fastpay.domain.model.enums.KeyType;
++import jakarta.validation.constraints.NotBlank;
++import jakarta.validation.constraints.NotNull;
++
++import java.util.UUID;
++
++public record PixKeyRequest(
++
++        @NotNull(message = "Account ID is mandatory")
++        UUID accountId,
++
++        @NotNull(message = "Key type is mandatory")
++        KeyType type,
++
++        @NotBlank(message = "Key value is mandatory")
++        String value
++) {
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/presentation/controller/request/TransferRequest.java b/src/main/java/com/fastpay/presentation/controller/request/TransferRequest.java
+index 3f35c9f..c0ab049 100644
+--- a/src/main/java/com/fastpay/presentation/controller/request/TransferRequest.java
++++ b/src/main/java/com/fastpay/presentation/controller/request/TransferRequest.java
+@@ -1,4 +1,21 @@
+ package com.fastpay.presentation.controller.request;
+ 
+-public class TransferRequest {
+-}
++import jakarta.validation.constraints.NotBlank;
++import jakarta.validation.constraints.NotNull;
++import jakarta.validation.constraints.Positive;
++
++import java.util.UUID;
++
++public record TransferRequest(
++
++        @NotNull(message = "Sender account ID is mandatory")
++        UUID senderAccountId,
++
++        @NotBlank(message = "Destination key is mandatory")
++        String destinationKey,
++
++        @NotNull(message = "Amount is mandatory")
++        @Positive(message = "Amount must be greater than zero")
++        Long amountInCents
++) {
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/presentation/controller/response/PixKeyResponse.java b/src/main/java/com/fastpay/presentation/controller/response/PixKeyResponse.java
+index ea7c027..f8d601f 100644
+--- a/src/main/java/com/fastpay/presentation/controller/response/PixKeyResponse.java
++++ b/src/main/java/com/fastpay/presentation/controller/response/PixKeyResponse.java
+@@ -1,4 +1,14 @@
+ package com.fastpay.presentation.controller.response;
+ 
+-public class PixKeyResponse {
+-}
++import com.fastpay.domain.model.enums.KeyType;
++
++import java.time.Instant;
++import java.util.UUID;
++
++public record PixKeyResponse(
++        UUID id,
++        KeyType type,
++        String value,
++        Instant createdAt
++) {
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/presentation/controller/response/TransferResponse.java b/src/main/java/com/fastpay/presentation/controller/response/TransferResponse.java
+index b77fc26..a7d7ffc 100644
+--- a/src/main/java/com/fastpay/presentation/controller/response/TransferResponse.java
++++ b/src/main/java/com/fastpay/presentation/controller/response/TransferResponse.java
+@@ -1,4 +1,13 @@
+ package com.fastpay.presentation.controller.response;
+ 
+-public class TransferResponse {
+-}
++import com.fastpay.domain.model.enums.TransactionStatus;
++
++import java.time.Instant;
++import java.util.UUID;
++
++public record TransferResponse(
++        UUID transactionId,
++        TransactionStatus status,
++        Instant timestamp
++) {
++}
+\ No newline at end of file
+diff --git a/src/main/java/com/fastpay/presentation/mapper/PixWebMapper.java b/src/main/java/com/fastpay/presentation/mapper/PixWebMapper.java
+index eca4418..8a1d6a1 100644
+--- a/src/main/java/com/fastpay/presentation/mapper/PixWebMapper.java
++++ b/src/main/java/com/fastpay/presentation/mapper/PixWebMapper.java
+@@ -1,4 +1,17 @@
+ package com.fastpay.presentation.mapper;
+ 
+-public class PixWebMapper {
+-}
++import com.fastpay.domain.model.PixKey;
++import com.fastpay.domain.model.Transaction;
++import com.fastpay.presentation.controller.response.PixKeyResponse;
++import com.fastpay.presentation.controller.response.TransferResponse;
++import org.mapstruct.Mapper;
++import org.mapstruct.Mapping;
++
++@Mapper(componentModel = "spring")
++public interface PixWebMapper {
++    PixKeyResponse toResponse(PixKey domain);
++
++    @Mapping(source = "id", target = "transactionId")
++    TransferResponse toResponse(Transaction domain);
++
++}
+\ No newline at end of file
+diff --git a/src/main/resources/application.yml b/src/main/resources/application.yml
+index c48e868..f25b474 100644
+--- a/src/main/resources/application.yml
++++ b/src/main/resources/application.yml
+@@ -1,3 +1,22 @@
+ spring:
+   application:
+     name: fastpay
++
++  datasource:
++    url: jdbc:postgresql://${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
++    username: ${POSTGRES_USER}
++    password: ${POSTGRES_PASSWORD}
++    driver-class-name: org.postgresql.Driver
++
++  jpa:
++    show-sql: true
++    open-in-view: true
++    hibernate:
++      ddl-auto: create
++    properties:
++      hibernate:
++        format_sql: true
++
++springdoc:
++  swagger-ui:
++    path: /docs
