@@ -1,5 +1,6 @@
 package com.fastpay.infra.persistence.postgres.entity;
 
+import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
@@ -21,4 +22,9 @@ public class UserEntity {
     private String name;
     private String document;
 
+    @Column(unique = true, nullable = false)
+    private String email;
+
+    @Column(nullable = false)
+    private String password;
 }

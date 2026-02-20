@@ -1,3 +1,11 @@
+jwt:
+  issuer: fastpay-api
+  key:
+    private:
+      path: classpath:certs/private.pem
+    public:
+      path: classpath:certs/public.pem
+
 spring:
   application:
     name: fastpay
