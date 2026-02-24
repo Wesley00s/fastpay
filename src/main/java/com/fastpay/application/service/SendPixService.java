@@ -9,6 +9,7 @@ import com.fastpay.domain.model.enums.TransactionStatus;
 import com.fastpay.domain.port.in.SendPixUseCase;
 import com.fastpay.domain.port.out.AccountDatabasePort;
 import com.fastpay.domain.port.out.PixKeyDatabasePort;
+import com.fastpay.domain.port.out.SettlementMessagingPort;
 import com.fastpay.domain.port.out.TransactionDatabasePort;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -24,6 +25,7 @@ public class SendPixService implements SendPixUseCase {
     private final AccountDatabasePort accountDatabasePort;
     private final PixKeyDatabasePort pixKeyDatabasePort;
     private final TransactionDatabasePort transactionDatabasePort;
+    private final SettlementMessagingPort settlementMessagingPort;
 
     @Override
     @Transactional
@@ -61,6 +63,9 @@ public class SendPixService implements SendPixUseCase {
                 .timestamp(Instant.now())
                 .build();
 
-        return transactionDatabasePort.save(transaction);
+        Transaction savedTransaction = transactionDatabasePort.save(transaction);
+
+        settlementMessagingPort.sendSettlementEvent(savedTransaction);
+        return savedTransaction;
     }
 }
