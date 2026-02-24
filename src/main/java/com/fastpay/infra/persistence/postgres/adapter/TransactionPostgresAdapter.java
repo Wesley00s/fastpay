@@ -7,6 +7,9 @@ import com.fastpay.infra.persistence.postgres.repository.SpringDataTransactionRe
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
+import java.util.Optional;
+import java.util.UUID;
+
 @Component
 @RequiredArgsConstructor
 public class TransactionPostgresAdapter implements TransactionDatabasePort {
@@ -17,5 +20,10 @@ public class TransactionPostgresAdapter implements TransactionDatabasePort {
     @Override
     public Transaction save(Transaction transaction) {
         return mapper.toDomain(repository.save(mapper.toEntity(transaction)));
+    }
+
+    @Override
+    public Optional<Transaction> findById(UUID id) {
+        return repository.findById(id).map(mapper::toDomain);
     }
 }
