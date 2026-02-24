@@ -16,8 +16,6 @@ public class FindPixKeyService implements FindPixKeyUseCase {
     @Override
     public PixKey findByValue(String value) {
         return pixKeyDatabasePort.findByValue(value)
-                .orElseThrow(() -> {
-                    return new KeyNotFoundException("Pix key not found: " + value);
-                });
+                .orElseThrow(() -> new KeyNotFoundException("Pix key not found: " + value));
     }
 }
