@@ -11,4 +11,6 @@ public interface AccountDatabasePort {
     Account update(Account account);
 
     Account save(Account account);
+
+    Optional<Account> findByUserEmail(String email);
 }

@@ -1,10 +1,14 @@
 package com.fastpay.presentation.controller;
 
+import com.fastpay.domain.model.Account;
 import com.fastpay.domain.model.PixKey;
+import com.fastpay.domain.model.enums.KeyType;
 import com.fastpay.domain.pagination.PageResult;
 import com.fastpay.domain.port.in.FindPixKeyUseCase;
+import com.fastpay.domain.port.in.GetAccountDetailsUseCase;
 import com.fastpay.domain.port.in.ListPixKeysUseCase;
 import com.fastpay.domain.port.in.RegisterPixKeyUseCase;
+import com.fastpay.infra.security.SecurityUtils;
 import com.fastpay.presentation.controller.request.PixKeyRequest;
 import com.fastpay.presentation.controller.response.PixKeyOwnerResponse;
 import com.fastpay.presentation.controller.response.PixKeyResponse;
@@ -19,10 +23,10 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
-import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/keys")
@@ -32,6 +36,7 @@ public class PixKeyController {
 
     private final RegisterPixKeyUseCase registerPixKeyUseCase;
     private final FindPixKeyUseCase findPixKeyUseCase;
+    private final GetAccountDetailsUseCase getAccountDetailsUseCase;
     private final ListPixKeysUseCase listPixKeysUseCase;
     private final PixWebMapper mapper;
 
@@ -42,10 +47,16 @@ public class PixKeyController {
             @ApiResponse(responseCode = "409", description = "Pix key already registered to another account", content = @Content)
     })
     @PostMapping
-    public ResponseEntity<PixKeyResponse> register(@RequestBody @Valid PixKeyRequest request) {
+    public ResponseEntity<PixKeyResponse> register(
+            @RequestBody @Valid PixKeyRequest request,
+            Authentication authentication
+    ) {
+        String email = SecurityUtils.extractEmail(authentication);
+        Account account = getAccountDetailsUseCase.getDetailsByEmail(email);
+
         PixKey registeredKey = registerPixKeyUseCase.register(
-                request.accountId(),
-                request.type(),
+                account.getId(),
+                KeyType.valueOf(request.type()),
                 request.value()
         );
 
@@ -71,13 +82,15 @@ public class PixKeyController {
     @ApiResponses(value = {
             @ApiResponse(responseCode = "200", description = "Keys retrieved successfully")
     })
-    @GetMapping("/account/{accountId}")
-    public ResponseEntity<PageResult<PixKeyResponse>> listByAccount(
-            @Parameter(description = "The UUID of the account") @PathVariable UUID accountId,
-            @Parameter(description = "Zero-based page index") @RequestParam(defaultValue = "0") int page,
-            @Parameter(description = "The size of the page to be returned") @RequestParam(defaultValue = "10") int size
+    @GetMapping("/account")
+    public ResponseEntity<PageResult<PixKeyResponse>> listMyKeys(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size,
+            Authentication authentication
     ) {
-        PageResult<PixKey> domainPage = listPixKeysUseCase.listByAccountId(accountId, page, size);
+        String email = SecurityUtils.extractEmail(authentication);
+        Account account = getAccountDetailsUseCase.getDetailsByEmail(email);
+        PageResult<PixKey> domainPage = listPixKeysUseCase.listByAccountId(account.getId(), page, size);
 
         List<PixKeyResponse> responseData = domainPage.data().stream()
                 .map(mapper::toResponse)

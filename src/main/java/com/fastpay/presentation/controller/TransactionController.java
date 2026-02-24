@@ -1,15 +1,17 @@
 package com.fastpay.presentation.controller;
 
+import com.fastpay.domain.model.Account;
 import com.fastpay.domain.model.Transaction;
 import com.fastpay.domain.pagination.PageResult;
+import com.fastpay.domain.port.in.GetAccountDetailsUseCase;
 import com.fastpay.domain.port.in.GetTransactionHistoryUseCase;
 import com.fastpay.domain.port.in.SendPixUseCase;
+import com.fastpay.infra.security.SecurityUtils;
 import com.fastpay.presentation.controller.request.TransferRequest;
 import com.fastpay.presentation.controller.response.TransactionHistoryResponse;
 import com.fastpay.presentation.controller.response.TransferResponse;
 import com.fastpay.presentation.mapper.PixWebMapper;
 import io.swagger.v3.oas.annotations.Operation;
-import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
@@ -18,10 +20,10 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
-import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/pix")
@@ -31,6 +33,7 @@ public class TransactionController {
 
     private final SendPixUseCase sendPixUseCase;
     private final GetTransactionHistoryUseCase getTransactionHistoryUseCase;
+    private final GetAccountDetailsUseCase getAccountDetailsUseCase;
     private final PixWebMapper mapper;
 
     @Operation(summary = "Initiate a Pix transfer", description = "Creates a new transaction to transfer funds asynchronously from the sender to the destination key owner.")
@@ -40,15 +43,20 @@ public class TransactionController {
             @ApiResponse(responseCode = "404", description = "Destination key not found", content = @Content)
     })
     @PostMapping("/transfer")
-    public ResponseEntity<TransferResponse> transfer(@RequestBody @Valid TransferRequest request) {
+    public ResponseEntity<TransferResponse> transfer(
+            @RequestBody @Valid TransferRequest request,
+            Authentication authentication
+    ) {
+        String email = SecurityUtils.extractEmail(authentication);
+        Account account = getAccountDetailsUseCase.getDetailsByEmail(email);
+
         Transaction transaction = sendPixUseCase.send(
-                request.senderAccountId(),
+                account.getId(),
                 request.destinationKey(),
                 request.amountInCents()
         );
 
         TransferResponse response = mapper.toResponse(transaction);
-
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(response);
     }
 
@@ -57,16 +65,18 @@ public class TransactionController {
             @ApiResponse(responseCode = "200", description = "History retrieved successfully"),
             @ApiResponse(responseCode = "404", description = "Account not found", content = @Content)
     })
-    @GetMapping("/history/{accountId}")
-    public ResponseEntity<PageResult<TransactionHistoryResponse>> getHistory(
-            @Parameter(description = "The UUID of the account") @PathVariable UUID accountId,
-            @Parameter(description = "Zero-based page index") @RequestParam(defaultValue = "0") int page,
-            @Parameter(description = "The size of the page to be returned") @RequestParam(defaultValue = "10") int size
+    @GetMapping("/history")
+    public ResponseEntity<PageResult<TransactionHistoryResponse>> getMyHistory(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size,
+            Authentication authentication
     ) {
-        PageResult<Transaction> domainPage = getTransactionHistoryUseCase.getHistory(accountId, page, size);
+        String email = SecurityUtils.extractEmail(authentication);
+        Account account = getAccountDetailsUseCase.getDetailsByEmail(email);
+        PageResult<Transaction> domainPage = getTransactionHistoryUseCase.getHistory(account.getId(), page, size);
 
         List<TransactionHistoryResponse> responseData = domainPage.data().stream()
-                .map(tx -> mapper.toHistoryResponse(tx, accountId))
+                .map(tx -> mapper.toHistoryResponse(tx, account.getId()))
                 .toList();
 
         PageResult<TransactionHistoryResponse> response = new PageResult<>(
