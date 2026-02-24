@@ -23,7 +23,7 @@ public class OpenApiConfig {
                         .version("v1.0")
                         .contact(new Contact()
                                 .name("Wesley Sousa")
-                                .url("https://youtube.com/@NullPointer")
+                                .url("https://gituhub.com/Wesley00s")
                         )
                 )
                 .addSecurityItem(new SecurityRequirement().addList(securitySchemeName))
