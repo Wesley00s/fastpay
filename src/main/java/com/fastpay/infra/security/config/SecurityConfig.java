@@ -1,5 +1,6 @@
-package com.fastpay.infra.security;
+package com.fastpay.infra.security.config;
 
+import com.fastpay.infra.security.JwtAuthenticationFilter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -15,9 +16,6 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
-// TODO: Importaremos esses arquivos assim que os criarmos
-// import com.fastpay.presentation.exception.CustomAccessDeniedHandler;
-// import com.fastpay.presentation.exception.CustomAuthenticationEntryPoint;
 
 @Configuration
 @EnableWebSecurity
@@ -25,15 +23,14 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 public class SecurityConfig {
 
     private static final String[] PUBLIC_URLS = {
-            "/api/v1/auth/**", // Rotas de login e cadastro
+            "/api/v1/auth/**",
             "/v3/api-docs/**",
             "/swagger-ui/**",
             "/swagger-ui.html",
             "/docs",
-            "/actuator/health" // Essencial para o Docker Healthcheck!
+            "/actuator/health"
     };
-    // private final CustomAccessDeniedHandler accessDeniedHandler;
-    // private final CustomAuthenticationEntryPoint authenticationEntryPoint;
+
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
 
     @Bean
@@ -44,7 +41,7 @@ public class SecurityConfig {
                         session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers(PUBLIC_URLS).permitAll()
-                        // Qualquer outra requisição (ex: /api/v1/keys, /api/v1/pix) exige token
+
                         .anyRequest().authenticated()
                 )
                 .formLogin(AbstractHttpConfigurer::disable)
@@ -52,9 +49,7 @@ public class SecurityConfig {
                 .headers(headers -> headers.frameOptions(HeadersConfigurer.FrameOptionsConfig::sameOrigin))
 
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
-        // .exceptionHandling(exceptions -> exceptions
-        //        .accessDeniedHandler(accessDeniedHandler)
-        //        .authenticationEntryPoint(authenticationEntryPoint));
+
 
         return http.build();
     }
@@ -65,7 +60,7 @@ public class SecurityConfig {
     }
 
     @Bean
-    public AuthenticationManager authenticationManager(AuthenticationConfiguration authentication) throws Exception {
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration authentication) {
         return authentication.getAuthenticationManager();
     }
 }
