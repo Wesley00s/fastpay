@@ -17,12 +17,6 @@ public class AccountOperationService implements GetAccountDetailsUseCase, Deposi
     private final AccountDatabasePort accountDatabasePort;
 
     @Override
-    public Account getDetails(UUID accountId) {
-        return accountDatabasePort.findById(accountId)
-                .orElseThrow(() -> new IllegalArgumentException("Account not found for ID: " + accountId));
-    }
-
-    @Override
     @Transactional
     public Account deposit(UUID accountId, Long amountInCents) {
 
@@ -32,5 +26,11 @@ public class AccountOperationService implements GetAccountDetailsUseCase, Deposi
         account.credit(amountInCents);
 
         return accountDatabasePort.update(account);
+    }
+
+    @Override
+    public Account getDetailsByEmail(String email) {
+        return accountDatabasePort.findByUserEmail(email)
+                .orElseThrow(() -> new IllegalArgumentException("Account not found for the authenticated user."));
     }
 }
