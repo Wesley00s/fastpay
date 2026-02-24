@@ -5,4 +5,5 @@ import java.util.UUID;
 public record SettlementEvent(
         UUID transactionId,
         String status
-) {}
+) {
+}

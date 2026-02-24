@@ -6,6 +6,9 @@ jwt:
     public:
       path: classpath:certs/public.pem
 
+  expiration:
+    seconds: 86400000
+
 spring:
   application:
     name: fastpay

@@ -1,9 +1,9 @@
 package com.fastpay.infra.messaging.kafka.adapter;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fastpay.domain.port.in.ProcessSettlementUseCase;
 import com.fastpay.infra.messaging.kafka.config.KafkaTopicConfig;
 import com.fastpay.infra.messaging.kafka.dto.SettlementEvent;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.annotation.KafkaListener;
